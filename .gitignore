@@ -1,0 +1,11 @@
+node_modules/
+.next/
+out/
+.env*
+!.env.example
+*.log
+.DS_Store
+
+# deployment artifacts
+.deploy-workbench-*/
+workbench-deploy-*.zip
