@@ -177,6 +177,21 @@ export function useFileLibrary() {
     setEntries((current) => current.map((entry) => entry.id === id ? { ...entry, parentId, modifiedAt: Date.now(), ...(entry.kind === "file" ? { storageState: "local" as const } : {}) } : entry));
   };
 
+  const moveEntries = (ids: string[], parentId: string | null) => {
+    const uniqueIds = [...new Set(ids)].filter((id) => id !== parentId);
+    if (!uniqueIds.length) return 0;
+    const movingIds = new Set(uniqueIds);
+    const descendants = new Set<string>();
+    const collect = (folderId: string) => activeEntries.filter((entry) => entry.parentId === folderId).forEach((entry) => { descendants.add(entry.id); if (entry.kind === "folder") collect(entry.id); });
+    uniqueIds.forEach((id) => {
+      const entry = activeEntries.find((candidate) => candidate.id === id);
+      if (entry?.kind === "folder") collect(id);
+    });
+    if (parentId && (movingIds.has(parentId) || descendants.has(parentId))) return 0;
+    setEntries((current) => current.map((entry) => movingIds.has(entry.id) ? { ...entry, parentId, modifiedAt: Date.now(), ...(entry.kind === "file" ? { storageState: "local" as const } : {}) } : entry));
+    return uniqueIds.length;
+  };
+
   const subtreeIds = (source: FileEntry[], rootIds: Iterable<string>) => {
     const ids = new Set(rootIds);
     let changed = true;
@@ -192,7 +207,7 @@ export function useFileLibrary() {
   const restoreEntry = (id: string) => restoreEntries([id]);
   const deleteForever = (id: string) => deleteEntriesForever([id]);
 
-  return { entries, activeEntries, folders, ready, error, setError, createFolder, createInternalFile, updateEntry, duplicateEntry, uploadFiles, importDroppedEntries, renameEntry, moveEntry, trashEntry, trashEntries, restoreEntry, restoreEntries, deleteForever, deleteEntriesForever, restoreAllTrash, emptyTrash };
+  return { entries, activeEntries, folders, ready, error, setError, createFolder, createInternalFile, updateEntry, duplicateEntry, uploadFiles, importDroppedEntries, renameEntry, moveEntry, moveEntries, trashEntry, trashEntries, restoreEntry, restoreEntries, deleteForever, deleteEntriesForever, restoreAllTrash, emptyTrash };
 }
 
 export type FileLibraryStore = ReturnType<typeof useFileLibrary>;

@@ -13,6 +13,7 @@ type ViewMode = "list" | "grid";
 type SortKey = "name" | "modified" | "size" | "type";
 type FileOpenMode = "normal" | "focus" | "fullscreen";
 type TrashSource = "all" | "files" | "knowledge" | "inbox" | "tasks";
+type MoveTarget = { ids: string[]; title: string; parentId: string | null };
 
 function textToDocument(text: string) {
   const lines = text.replace(/\r/g, "").split("\n");
@@ -75,18 +76,18 @@ function FileThumbnail({ entry }: { entry: FileEntry }) {
   return <img src={url} alt="" />;
 }
 
-function FolderTree({ entries, parentId, selectedId, expanded, onToggle, onSelect, onMove, externalTargetId, onExternalTarget, onExternalDrop, onContextMenu }: {
-  entries: FileEntry[]; parentId: string | null; selectedId: string | null; expanded: Set<string>; onToggle: (id: string) => void; onSelect: (id: string | null) => void; onMove: (entryId: string, parentId: string | null) => void; externalTargetId: string | null | undefined; onExternalTarget: (id: string) => void; onExternalDrop: (event: React.DragEvent, id: string) => void; onContextMenu: (event: React.MouseEvent, entry: FileEntry) => void;
+function FolderTree({ entries, parentId, selectedId, selectedIds, expanded, onToggle, onSelect, onMove, externalTargetId, onExternalTarget, onExternalDrop, onContextMenu }: {
+  entries: FileEntry[]; parentId: string | null; selectedId: string | null; selectedIds: Set<string>; expanded: Set<string>; onToggle: (id: string) => void; onSelect: (event: React.MouseEvent, id: string) => void; onMove: (entryIds: string[], parentId: string | null) => void; externalTargetId: string | null | undefined; onExternalTarget: (id: string) => void; onExternalDrop: (event: React.DragEvent, id: string) => void; onContextMenu: (event: React.MouseEvent, entry: FileEntry) => void;
 }) {
   return entries.filter((entry) => entry.kind === "folder" && entry.parentId === parentId && !entry.deletedAt).sort((a, b) => a.sortOrder - b.sortOrder).map((folder) => {
     const hasChildren = entries.some((entry) => entry.kind === "folder" && entry.parentId === folder.id && !entry.deletedAt);
     const isOpen = expanded.has(folder.id);
     return <div key={folder.id} className="folder-node">
-      <div className={`folder-node-row ${selectedId === folder.id ? "selected" : ""} ${externalTargetId === folder.id ? "external-target" : ""}`} onContextMenu={(event) => onContextMenu(event, folder)}>
+      <div className={`folder-node-row ${selectedId === folder.id ? "selected" : ""} ${selectedIds.has(folder.id) ? "multi-selected" : ""} ${externalTargetId === folder.id ? "external-target" : ""}`} onContextMenu={(event) => onContextMenu(event, folder)}>
         <button className="tree-toggle" onClick={() => hasChildren && onToggle(folder.id)} aria-label={isOpen ? "收起目录" : "展开目录"}>{hasChildren ? isOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} /> : <span />}</button>
-        <button className="folder-select" onClick={() => onSelect(folder.id)} onDragEnter={(event) => { if (isExternalFileDrag(event.dataTransfer)) { event.preventDefault(); onExternalTarget(folder.id); } }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); if (isExternalFileDrag(event.dataTransfer)) onExternalDrop(event, folder.id); else onMove(event.dataTransfer.getData("text/workbench-entry"), folder.id); }}>{isOpen ? <FolderOpen size={18} /> : <Folder size={18} />}<span>{folder.name}</span></button>
+        <button className="folder-select" draggable onClick={(event) => onSelect(event, folder.id)} onDragStart={(event) => { const ids = selectedIds.has(folder.id) ? [...selectedIds] : [folder.id]; event.dataTransfer.setData("text/workbench-entries", JSON.stringify(ids)); event.dataTransfer.setData("text/workbench-entry", folder.id); }} onDragEnter={(event) => { if (isExternalFileDrag(event.dataTransfer)) { event.preventDefault(); onExternalTarget(folder.id); } }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); if (isExternalFileDrag(event.dataTransfer)) onExternalDrop(event, folder.id); else { const raw = event.dataTransfer.getData("text/workbench-entries"); const ids = raw ? JSON.parse(raw) as string[] : [event.dataTransfer.getData("text/workbench-entry")].filter(Boolean); onMove(ids, folder.id); } }}>{isOpen ? <FolderOpen size={18} /> : <Folder size={18} />}<span>{folder.name}</span></button>
       </div>
-      {isOpen && <div className="folder-children"><FolderTree entries={entries} parentId={folder.id} selectedId={selectedId} expanded={expanded} onToggle={onToggle} onSelect={onSelect} onMove={onMove} externalTargetId={externalTargetId} onExternalTarget={onExternalTarget} onExternalDrop={onExternalDrop} onContextMenu={onContextMenu} /></div>}
+      {isOpen && <div className="folder-children"><FolderTree entries={entries} parentId={folder.id} selectedId={selectedId} selectedIds={selectedIds} expanded={expanded} onToggle={onToggle} onSelect={onSelect} onMove={onMove} externalTargetId={externalTargetId} onExternalTarget={onExternalTarget} onExternalDrop={onExternalDrop} onContextMenu={onContextMenu} /></div>}
     </div>;
   });
 }
@@ -194,13 +195,15 @@ export function FileLibraryPage({ initialShowTrash = false }: { initialShowTrash
   const [editingName, setEditingName] = useState("");
   const [newMenuOpen, setNewMenuOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entryId: string | null; targetFolderId: string | null; trashRoot?: boolean } | null>(null);
-  const [moving, setMoving] = useState<FileEntry | null>(null);
+  const [moving, setMoving] = useState<MoveTarget | null>(null);
   const [preview, setPreview] = useState<FileEntry | null>(null);
   const [internalEditorId, setInternalEditorId] = useState<string | null>(null);
   const [showTrash, setShowTrash] = useState(initialShowTrash);
   const [trashSource, setTrashSource] = useState<TrashSource>("all");
   const [trashBulkMode, setTrashBulkMode] = useState(false);
   const [selectedTrashIds, setSelectedTrashIds] = useState<Set<string>>(new Set());
+  const [selectedEntryIds, setSelectedEntryIds] = useState<Set<string>>(new Set());
+  const [lastSelectedEntryId, setLastSelectedEntryId] = useState<string | null>(null);
   const [externalDragging, setExternalDragging] = useState(false);
   const [dropTargetId, setDropTargetId] = useState<string | null | undefined>(undefined);
   const [dropNotice, setDropNotice] = useState("");
@@ -238,6 +241,61 @@ export function FileLibraryPage({ initialShowTrash = false }: { initialShowTrash
       return a.name.localeCompare(b.name, "zh-CN");
     });
   }, [folderId, query, showTrash, sort, store.activeEntries, trashRootEntries, trashSource]);
+
+  const visibleFolderIds = useMemo(() => {
+    const ids: string[] = [];
+    const collect = (parent: string | null) => {
+      store.activeEntries.filter((entry) => entry.kind === "folder" && entry.parentId === parent).sort((a, b) => a.sortOrder - b.sortOrder).forEach((entry) => {
+        ids.push(entry.id);
+        if (expanded.has(entry.id)) collect(entry.id);
+      });
+    };
+    collect(null);
+    return ids;
+  }, [expanded, store.activeEntries]);
+
+  const selectableEntryIds = useMemo(() => showTrash ? [] : [...visibleFolderIds, ...currentEntries.map((entry) => entry.id)], [currentEntries, showTrash, visibleFolderIds]);
+  const selectedEntries = useMemo(() => store.activeEntries.filter((entry) => selectedEntryIds.has(entry.id)), [selectedEntryIds, store.activeEntries]);
+  const selectedFoldersCount = selectedEntries.filter((entry) => entry.kind === "folder").length;
+  const selectedFilesCount = selectedEntries.length - selectedFoldersCount;
+
+  const applyEntrySelection = (id: string, event?: React.MouseEvent) => {
+    if (showTrash) return;
+    setSelectedEntryIds((current) => {
+      if (event?.shiftKey && lastSelectedEntryId) {
+        const from = selectableEntryIds.indexOf(lastSelectedEntryId);
+        const to = selectableEntryIds.indexOf(id);
+        if (from >= 0 && to >= 0) {
+          const [start, end] = from < to ? [from, to] : [to, from];
+          return new Set([...current, ...selectableEntryIds.slice(start, end + 1)]);
+        }
+      }
+      if (event?.ctrlKey || event?.metaKey) {
+        const next = new Set(current);
+        if (next.has(id)) next.delete(id); else next.add(id);
+        return next;
+      }
+      return new Set([id]);
+    });
+    setLastSelectedEntryId(id);
+  };
+
+  const clearEntrySelection = () => { setSelectedEntryIds(new Set()); setLastSelectedEntryId(null); };
+
+  const actionIdsFor = (entry?: FileEntry | null) => {
+    if (entry && selectedEntryIds.has(entry.id) && selectedEntryIds.size > 1) return [...selectedEntryIds];
+    if (entry) return [entry.id];
+    return [...selectedEntryIds];
+  };
+
+  const moveEntriesTo = (ids: string[], targetFolderId: string | null) => {
+    const moved = store.moveEntries(ids, targetFolderId);
+    if (moved) {
+      clearEntrySelection();
+      const target = targetFolderId ? store.folders.find((folder) => folder.id === targetFolderId)?.name ?? "目标文件夹" : "全部文件";
+      setDropNotice(`已移动 ${moved} 项到“${target}”`);
+    }
+  };
 
   const breadcrumbs = useMemo(() => {
     const path: FileEntry[] = [];
@@ -484,21 +542,29 @@ export function FileLibraryPage({ initialShowTrash = false }: { initialShowTrash
     event.currentTarget.classList.remove("internal-drop-target");
     if (isExternalFileDrag(event.dataTransfer)) void importDrop(event, entry.id);
     else {
-      const draggedId = event.dataTransfer.getData("text/workbench-entry");
-      if (draggedId && draggedId !== entry.id) {
-        const draggedEntry = store.activeEntries.find((candidate) => candidate.id === draggedId);
-        store.moveEntry(draggedId, entry.id);
-        setExpanded((current) => new Set(current).add(entry.id));
-        setDropNotice(`已将“${draggedEntry?.name ?? "文件"}”移动到“${entry.name}”`);
+      const raw = event.dataTransfer.getData("text/workbench-entries");
+      const ids = raw ? JSON.parse(raw) as string[] : [event.dataTransfer.getData("text/workbench-entry")].filter(Boolean);
+      const validIds = ids.filter((id) => id && id !== entry.id);
+      if (validIds.length) {
+        const moved = store.moveEntries(validIds, entry.id);
+        if (moved) {
+          setExpanded((current) => new Set(current).add(entry.id));
+          clearEntrySelection();
+          setDropNotice(`已将 ${moved} 项移动到“${entry.name}”`);
+        }
       }
     }
   };
 
   useEffect(() => {
-    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") { dragDepth.current = 0; setExternalDragging(false); setDropTargetId(undefined); } };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { dragDepth.current = 0; setExternalDragging(false); setDropTargetId(undefined); clearEntrySelection(); }
+      if (!showTrash && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") { event.preventDefault(); setSelectedEntryIds(new Set(selectableEntryIds)); }
+      if (!showTrash && selectedEntryIds.size && (event.key === "Delete" || event.key === "Backspace")) { event.preventDefault(); store.trashEntries([...selectedEntryIds]); clearEntrySelection(); }
+    };
     window.addEventListener("keydown", escape);
     return () => window.removeEventListener("keydown", escape);
-  }, []);
+  }, [selectableEntryIds, selectedEntryIds, showTrash, store]);
 
   if (!store.ready) return <div className="file-library-loading">正在打开文件库…</div>;
 
@@ -529,33 +595,34 @@ export function FileLibraryPage({ initialShowTrash = false }: { initialShowTrash
         <div className="trash-source-note">统一处理删除内容，恢复时会回到原位置。</div>
       </aside> : <aside className="folder-panel">
         <div className="folder-panel-title"><span>文件夹</span>{!initialShowTrash && <button onClick={() => setCreating(true)} aria-label="新建文件夹"><Plus size={17} /></button>}</div>
-        <button className={`root-folder ${folderId === null && !showTrash ? "selected" : ""} ${externalDragging && dropTargetId === null ? "external-target" : ""}`} onClick={() => { setFolderId(null); setShowTrash(false); }} onContextMenu={(event) => openContextMenu(event, null, null)} onDragEnter={(event) => { if (isExternalFileDrag(event.dataTransfer)) { event.preventDefault(); setDropTargetId(null); } }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); if (isExternalFileDrag(event.dataTransfer)) void importDrop(event, null); else store.moveEntry(event.dataTransfer.getData("text/workbench-entry"), null); }}><HardDrive size={18} />全部文件</button>
-        <div className="folder-tree"><FolderTree entries={store.entries} parentId={null} selectedId={folderId} expanded={expanded} onToggle={(id) => setExpanded((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; })} onSelect={(id) => { setFolderId(id); setShowTrash(false); }} onMove={store.moveEntry} externalTargetId={externalDragging ? dropTargetId : undefined} onExternalTarget={setDropTargetId} onExternalDrop={(event, id) => void importDrop(event, id)} onContextMenu={(event, entry) => openContextMenu(event, entry, entry.id)} /></div>
+        {selectedEntryIds.size > 0 && <div className="file-selection-bar"><span>已选 {selectedEntryIds.size} 项{selectedFilesCount ? ` · 文件 ${selectedFilesCount}` : ""}{selectedFoldersCount ? ` · 文件夹 ${selectedFoldersCount}` : ""}</span><button onClick={() => setMoving({ ids: [...selectedEntryIds], title: `${selectedEntryIds.size} 项`, parentId: folderId })}>移动到…</button><button className="danger" onClick={() => { store.trashEntries([...selectedEntryIds]); clearEntrySelection(); }}>移到回收站</button><button onClick={clearEntrySelection}>取消</button></div>}
+        <button className={`root-folder ${folderId === null && !showTrash ? "selected" : ""} ${externalDragging && dropTargetId === null ? "external-target" : ""}`} onClick={() => { setFolderId(null); setShowTrash(false); clearEntrySelection(); }} onContextMenu={(event) => openContextMenu(event, null, null)} onDragEnter={(event) => { if (isExternalFileDrag(event.dataTransfer)) { event.preventDefault(); setDropTargetId(null); } }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); if (isExternalFileDrag(event.dataTransfer)) void importDrop(event, null); else { const raw = event.dataTransfer.getData("text/workbench-entries"); const ids = raw ? JSON.parse(raw) as string[] : [event.dataTransfer.getData("text/workbench-entry")].filter(Boolean); moveEntriesTo(ids, null); } }}><HardDrive size={18} />全部文件</button>
+        <div className="folder-tree"><FolderTree entries={store.entries} parentId={null} selectedId={folderId} selectedIds={selectedEntryIds} expanded={expanded} onToggle={(id) => setExpanded((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; })} onSelect={(event, id) => { applyEntrySelection(id, event); if (!event.ctrlKey && !event.metaKey && !event.shiftKey) { setFolderId(id); setShowTrash(false); } }} onMove={moveEntriesTo} externalTargetId={externalDragging ? dropTargetId : undefined} onExternalTarget={setDropTargetId} onExternalDrop={(event, id) => void importDrop(event, id)} onContextMenu={(event, entry) => { if (!selectedEntryIds.has(entry.id)) applyEntrySelection(entry.id, event); openContextMenu(event, entry, entry.id); }} /></div>
         <button className="trash-link" onClick={() => { setShowTrash(true); setTrashBulkMode(false); setSelectedTrashIds(new Set()); }} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: Math.max(8, Math.min(event.clientX, window.innerWidth - 224)), y: event.clientY, entryId: null, targetFolderId: null, trashRoot: true }); }}><Trash2 size={18} />回收站 <span>{store.entries.filter((entry) => entry.deletedAt).length}</span></button>
       </aside>}
 
       <section className="file-content" onContextMenu={(event) => { if (!(event.target as Element).closest(".file-list-row,.file-card,.file-content-head,.new-folder-row")) openContextMenu(event, null, folderId); }} onDragEnter={(event) => { if (isExternalFileDrag(event.dataTransfer)) { event.preventDefault(); setDropTargetId(folderId); } }} onDragOver={(event) => { if (isExternalFileDrag(event.dataTransfer)) { event.preventDefault(); setDropTargetId(folderId); } }}>
         <div className="file-content-head">
           <div className="breadcrumbs"><button onClick={() => { setFolderId(null); setShowTrash(false); }}>{showTrash ? "文件库" : "全部文件"}</button>{showTrash ? <><ChevronRight size={15} /><strong>{initialShowTrash ? "全局回收站" : "回收站"}</strong></> : breadcrumbs.map((folder) => <span key={folder.id}><ChevronRight size={15} /><button onClick={() => setFolderId(folder.id)}>{folder.name}</button></span>)}</div>
-          {showTrash ? <div className="trash-bulk-actions">{trashBulkMode ? <><button onClick={() => setSelectedTrashIds(selectedTrashIds.size === currentEntries.length ? new Set() : new Set(currentEntries.map((entry) => entry.id)))}>{selectedTrashIds.size === currentEntries.length && currentEntries.length ? "取消全选" : "全选"}</button><span>已选 {selectedTrashIds.size} 项</span><button disabled={!selectedTrashIds.size} onClick={() => { store.restoreEntries([...selectedTrashIds]); setSelectedTrashIds(new Set()); }}>恢复所选</button><button className="danger" disabled={!selectedTrashIds.size} onClick={confirmDeleteSelected}>永久删除</button><button onClick={() => { setTrashBulkMode(false); setSelectedTrashIds(new Set()); }}>退出</button></> : <><button onClick={() => setTrashBulkMode(true)}>批量管理</button><button onClick={() => store.restoreAllTrash()}>恢复全部</button><button className="danger" onClick={confirmEmptyTrash}>清空回收站</button></>}</div> : <div className="view-actions"><select value={sort} onChange={(event) => setSort(event.target.value as SortKey)} aria-label="排序"><option value="name">按名称</option><option value="modified">按修改时间</option><option value="size">按大小</option><option value="type">按类型</option></select><button className={view === "list" ? "active" : ""} onClick={() => setView("list")} aria-label="列表视图"><List size={18} /></button><button className={view === "grid" ? "active" : ""} onClick={() => setView("grid")} aria-label="网格视图"><Grid2X2 size={18} /></button></div>}
+          {showTrash ? <div className="trash-bulk-actions">{trashBulkMode ? <><button onClick={() => setSelectedTrashIds(selectedTrashIds.size === currentEntries.length ? new Set() : new Set(currentEntries.map((entry) => entry.id)))}>{selectedTrashIds.size === currentEntries.length && currentEntries.length ? "取消全选" : "全选"}</button><span>已选 {selectedTrashIds.size} 项</span><button disabled={!selectedTrashIds.size} onClick={() => { store.restoreEntries([...selectedTrashIds]); setSelectedTrashIds(new Set()); }}>恢复所选</button><button className="danger" disabled={!selectedTrashIds.size} onClick={confirmDeleteSelected}>永久删除</button><button onClick={() => { setTrashBulkMode(false); setSelectedTrashIds(new Set()); }}>退出</button></> : <><button onClick={() => setTrashBulkMode(true)}>批量管理</button><button onClick={() => store.restoreAllTrash()}>恢复全部</button><button className="danger" onClick={confirmEmptyTrash}>清空回收站</button></>}</div> : selectedEntryIds.size > 0 ? <div className="trash-bulk-actions"><span>已选 {selectedEntryIds.size} 项</span><button onClick={() => setMoving({ ids: [...selectedEntryIds], title: `${selectedEntryIds.size} 项`, parentId: folderId })}>移动到…</button><button className="danger" onClick={() => { store.trashEntries([...selectedEntryIds]); clearEntrySelection(); }}>移到回收站</button><button onClick={clearEntrySelection}>取消</button></div> : <div className="view-actions"><select value={sort} onChange={(event) => setSort(event.target.value as SortKey)} aria-label="排序"><option value="name">按名称</option><option value="modified">按修改时间</option><option value="size">按大小</option><option value="type">按类型</option></select><button className={view === "list" ? "active" : ""} onClick={() => setView("list")} aria-label="列表视图"><List size={18} /></button><button className={view === "grid" ? "active" : ""} onClick={() => setView("grid")} aria-label="网格视图"><Grid2X2 size={18} /></button></div>}
         </div>
 
         {creating && !showTrash && <div className="new-folder-row"><Folder size={20} /><input autoFocus value={newFolderName} onChange={(event) => setNewFolderName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") createFolder(); if (event.key === "Escape") setCreating(false); }} placeholder="输入文件夹名称" /><button onClick={createFolder}>创建</button><button onClick={() => setCreating(false)}>取消</button></div>}
 
         {view === "list" ? <div className={`file-list ${showTrash ? "trash-list" : ""}`}>
           <div className="file-list-head">{showTrash ? <><span>名称</span><span>来源</span><span>原位置</span><span>类型</span><span>删除时间</span><span /></> : <><span>名称</span><span>大小</span><span>类型</span><span>修改时间</span><span>状态</span><span /></>}</div>
-          {currentEntries.map((entry) => <div className="file-list-row" key={entry.id} draggable={!showTrash} onContextMenu={(event) => openContextMenu(event, entry)} onDragStart={(event) => event.dataTransfer.setData("text/workbench-entry", entry.id)} onDragOver={(event) => dragOverFolderEntry(event, entry)} onDragLeave={leaveFolderEntry} onDrop={(event) => dropIntoFolderEntry(event, entry)} onDoubleClick={() => !showTrash && openEntry(entry)}>
-            <div className="file-name-cell">{showTrash && trashBulkMode && <input type="checkbox" checked={selectedTrashIds.has(entry.id)} onChange={() => setSelectedTrashIds((current) => { const next = new Set(current); if (next.has(entry.id)) next.delete(entry.id); else next.add(entry.id); return next; })}/>}<EntryIcon entry={entry} />{editingId === entry.id ? <input autoFocus value={editingName} onChange={(event) => setEditingName(event.target.value)} onBlur={() => commitRename(entry)} onKeyDown={(event) => { if (event.key === "Enter") commitRename(entry); if (event.key === "Escape") setEditingId(null); }} /> : <button onClick={() => !showTrash && openEntry(entry)}>{entry.name}</button>}</div>
+          {currentEntries.map((entry) => <div className={`file-list-row ${selectedEntryIds.has(entry.id) ? "multi-selected" : ""}`} key={entry.id} draggable={!showTrash} onClick={(event) => { if (!showTrash) applyEntrySelection(entry.id, event); }} onContextMenu={(event) => { if (!selectedEntryIds.has(entry.id)) applyEntrySelection(entry.id, event); openContextMenu(event, entry); }} onDragStart={(event) => { const ids = selectedEntryIds.has(entry.id) ? [...selectedEntryIds] : [entry.id]; event.dataTransfer.setData("text/workbench-entries", JSON.stringify(ids)); event.dataTransfer.setData("text/workbench-entry", entry.id); }} onDragOver={(event) => dragOverFolderEntry(event, entry)} onDragLeave={leaveFolderEntry} onDrop={(event) => dropIntoFolderEntry(event, entry)} onDoubleClick={() => !showTrash && openEntry(entry)}>
+            <div className="file-name-cell">{showTrash && trashBulkMode && <input type="checkbox" checked={selectedTrashIds.has(entry.id)} onChange={() => setSelectedTrashIds((current) => { const next = new Set(current); if (next.has(entry.id)) next.delete(entry.id); else next.add(entry.id); return next; })}/>}<EntryIcon entry={entry} />{editingId === entry.id ? <input autoFocus value={editingName} onChange={(event) => setEditingName(event.target.value)} onBlur={() => commitRename(entry)} onKeyDown={(event) => { if (event.key === "Enter") commitRename(entry); if (event.key === "Escape") setEditingId(null); }} /> : <button onClick={(event) => { event.stopPropagation(); if (!showTrash && (event.ctrlKey || event.metaKey || event.shiftKey)) applyEntrySelection(entry.id, event); else if (!showTrash) openEntry(entry); }}>{entry.name}</button>}</div>
             {showTrash ? <><span><em className="trash-source-badge">文件库</em></span><span className="trash-original-path">{originalPath(entry)}</span><span>{fileTypeLabel(entry)}</span><span>{new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(entry.deletedAt ?? entry.modifiedAt)}</span></> : <><span>{formatFileSize(entry.size)}</span><span>{fileTypeLabel(entry)}</span><span>{new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(entry.modifiedAt)}</span><span className={entry.storageState === "synced" && entry.cloudSha256 && (!entry.internalType || entry.cloudObjectKey === cloudObjectKeyForEntry(entry)) ? "cloud-state" : "local-state"}>{entry.storageState === "synced" && entry.cloudSha256 && (!entry.internalType || entry.cloudObjectKey === cloudObjectKeyForEntry(entry)) ? "本地 + 云端" : entry.storageState === "synced" ? "待云端验证" : entry.storageState === "cloud" ? "仅云端" : "仅本地"}</span></>}
             <div className="entry-menu-wrap"><button className="entry-menu-button" onClick={(event) => openButtonMenu(event, entry)} aria-label={`${entry.name}更多操作`}><MoreHorizontal size={18} /></button></div>
           </div>)}
-        </div> : <div className="file-grid">{currentEntries.map((entry) => <div className="file-card" key={entry.id} draggable={!showTrash} onContextMenu={(event) => openContextMenu(event, entry)} onDragStart={(event) => event.dataTransfer.setData("text/workbench-entry", entry.id)} onDragOver={(event) => dragOverFolderEntry(event, entry)} onDragLeave={leaveFolderEntry} onDrop={(event) => dropIntoFolderEntry(event, entry)} onDoubleClick={() => !showTrash && openEntry(entry)}><div className="file-card-preview"><FileThumbnail entry={entry} /></div><div className="file-card-name">{entry.name}</div><span>{entry.kind === "folder" ? "文件夹" : formatFileSize(entry.size)}</span><button onClick={(event) => openButtonMenu(event, entry)} aria-label={`${entry.name}更多操作`}><MoreHorizontal size={18} /></button></div>)}</div>}
+        </div> : <div className="file-grid">{currentEntries.map((entry) => <div className={`file-card ${selectedEntryIds.has(entry.id) ? "multi-selected" : ""}`} key={entry.id} draggable={!showTrash} onClick={(event) => { if (!showTrash) applyEntrySelection(entry.id, event); }} onContextMenu={(event) => { if (!selectedEntryIds.has(entry.id)) applyEntrySelection(entry.id, event); openContextMenu(event, entry); }} onDragStart={(event) => { const ids = selectedEntryIds.has(entry.id) ? [...selectedEntryIds] : [entry.id]; event.dataTransfer.setData("text/workbench-entries", JSON.stringify(ids)); event.dataTransfer.setData("text/workbench-entry", entry.id); }} onDragOver={(event) => dragOverFolderEntry(event, entry)} onDragLeave={leaveFolderEntry} onDrop={(event) => dropIntoFolderEntry(event, entry)} onDoubleClick={() => !showTrash && openEntry(entry)}><div className="file-card-preview"><FileThumbnail entry={entry} /></div><div className="file-card-name">{entry.name}</div><span>{entry.kind === "folder" ? "文件夹" : formatFileSize(entry.size)}</span><button onClick={(event) => { event.stopPropagation(); openButtonMenu(event, entry); }} aria-label={`${entry.name}更多操作`}><MoreHorizontal size={18} /></button></div>)}</div>}
 
         {!currentEntries.length && <div className="empty-files"><FolderOpen size={42} /><h3>{showTrash ? "回收站是空的" : query ? "没有找到相关文件" : "这个文件夹还是空的"}</h3><p>{showTrash ? "删除的项目会暂存在这里" : "上传文件或新建文件夹开始整理"}</p></div>}
       </section>
     </div>
 
-    {moving && <div className="move-backdrop"><div className="move-dialog"><h3>移动“{moving.name}”</h3><p>选择目标文件夹</p><select defaultValue={moving.parentId ?? "root"} id="move-target"><option value="root">全部文件</option>{store.folders.filter((folder) => folder.id !== moving.id).map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select><div><button onClick={() => setMoving(null)}>取消</button><button className="primary" onClick={() => { const select = document.querySelector<HTMLSelectElement>("#move-target"); store.moveEntry(moving.id, select?.value === "root" ? null : select?.value ?? null); setMoving(null); }}>移动</button></div></div></div>}
+    {moving && <div className="move-backdrop"><div className="move-dialog"><h3>移动“{moving.title}”</h3><p>选择目标文件夹</p><select defaultValue={moving.parentId ?? "root"} id="move-target"><option value="root">全部文件</option>{store.folders.filter((folder) => !moving.ids.includes(folder.id)).map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select><div><button onClick={() => setMoving(null)}>取消</button><button className="primary" onClick={() => { const select = document.querySelector<HTMLSelectElement>("#move-target"); moveEntriesTo(moving.ids, select?.value === "root" ? null : select?.value ?? null); setMoving(null); }}>移动</button></div></div></div>}
     {preview && <Preview key={preview.id} entry={preview} onClose={() => setPreview(null)} onEdit={() => { const entry = preview; setPreview(null); openEntry(entry); }} />}
     {internalEditorEntry?.internalType && <InternalFileEditor key={internalEditorEntry.id} entry={internalEditorEntry} onClose={() => setInternalEditorId(null)} setError={store.setError} onUpdate={(patch) => store.updateEntry(internalEditorEntry.id, patch)} onSync={(patch) => syncEditorPatchToCloud(internalEditorEntry, patch)}/>}
     {contextMenu && <div ref={contextMenuRef} className="file-context-menu" style={{ left: contextMenu.x, top: Math.max(8, contextMenu.y) }} onContextMenu={(event) => event.preventDefault()}>
@@ -568,12 +635,13 @@ export function FileLibraryPage({ initialShowTrash = false }: { initialShowTrash
         <button className="danger" onClick={() => { deleteForeverWithCloud(contextEntry); setContextMenu(null); }}><Trash2 size={15}/>永久删除</button>
       </> : <>
         {contextEntry && <>
+          {selectedEntryIds.has(contextEntry.id) && selectedEntryIds.size > 1 && <><button onClick={() => { setMoving({ ids: actionIdsFor(contextEntry), title: `${selectedEntryIds.size} 项`, parentId: folderId }); setContextMenu(null); }}><MoveRight size={15}/>移动选中 {selectedEntryIds.size} 项</button><button className="danger" onClick={() => { store.trashEntries(actionIdsFor(contextEntry)); clearEntrySelection(); setContextMenu(null); }}><Trash2 size={15}/>选中项移到回收站</button><i/></>}
           <button onClick={() => { openEntry(contextEntry); setContextMenu(null); }}>{contextEntry.kind === "folder" ? <FolderOpen size={15}/> : <FileText size={15}/>}打开</button>
           {contextEntry.kind === "folder" && <><i/><button onClick={() => createAt("folder", contextEntry.id)}><FolderPlus size={15}/>在此新建文件夹</button><button onClick={() => createAt("document", contextEntry.id)}><FilePlus2 size={15}/>在此新建文档</button><button onClick={() => createAt("spreadsheet", contextEntry.id)}><Table2 size={15}/>在此新建表格</button><button onClick={() => createAt("text", contextEntry.id)}><FileType2 size={15}/>在此新建 TXT</button><button onClick={() => { setFolderId(contextEntry.id); setShowTrash(false); setContextMenu(null); window.setTimeout(() => inputRef.current?.click(), 0); }}><Upload size={15}/>上传到此</button></>}
           <i/>
           <button onClick={() => { const name = window.prompt("输入新名称", contextEntry.name)?.trim(); if (name) { const message = store.renameEntry(contextEntry.id, name); if (message) store.setError(message); } setContextMenu(null); }}><FileType2 size={15}/>重命名</button>
           <button onClick={() => { store.duplicateEntry(contextEntry.id); setContextMenu(null); }}><Copy size={15}/>创建副本</button>
-          <button onClick={() => { setMoving(contextEntry); setContextMenu(null); }}><MoveRight size={15}/>移动到…</button>
+          <button onClick={() => { setMoving({ ids: [contextEntry.id], title: contextEntry.name, parentId: contextEntry.parentId }); setContextMenu(null); }}><MoveRight size={15}/>移动到…</button>
           {contextEntry.kind === "file" && contextEntry.blob && <button onClick={() => { download(contextEntry); setContextMenu(null); }}><Download size={15}/>下载</button>}
           {contextEntry.kind === "file" && <><button disabled={!contextEntry.cloudObjectKey} onClick={() => { void copyOssPath(contextEntry); setContextMenu(null); }}><CloudUpload size={15}/>复制 OSS 路径</button><button disabled={!contextEntry.cloudObjectKey} onClick={() => { void copyOssDownloadLink(contextEntry); setContextMenu(null); }}><Download size={15}/>复制下载链接</button></>}
           <button onClick={() => { window.alert(`${contextEntry.name}\n类型：${fileTypeLabel(contextEntry)}\n大小：${formatFileSize(contextEntry.size)}\n修改时间：${new Date(contextEntry.modifiedAt).toLocaleString("zh-CN")}\nOSS路径：${contextEntry.cloudObjectKey ?? "未同步"}`); setContextMenu(null); }}><Info size={15}/>查看详情</button>
