@@ -10,3 +10,5 @@ out/
 .deploy-workbench-*/
 workbench-deploy-*.zip
 .tmp-deploy-key.pub
+.tmp_github_deploy_*
+.tmp_github_deploy_rsa_*
